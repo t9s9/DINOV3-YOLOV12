@@ -169,6 +169,7 @@ class YOLODataset(BaseDataset):
                 lb["segments"] = []
         if len_cls == 0:
             LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. {HELP_URL}")
+            raise ValueError("Dataset corrupted, check paths in dataset YAML file.")
         return labels
 
     def build_transforms(self, hyp=None):

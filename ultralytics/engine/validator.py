@@ -189,9 +189,17 @@ class BaseValidator:
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)
+
             if self.args.plots and batch_i < 3:
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
+
+            if self.training and batch_i == 0 and self.args.wandb_plots:  # otherwise trainer is None
+                if trainer.epoch % 50 == 0: # log every 10 epochs
+                    self.log_predictions_to_wandb(batch, preds, batch_i, trainer=trainer)
+
+                if trainer.epoch == 0:
+                    self.log_val_samples_to_wandb(batch, batch_i, trainer)
 
             self.run_callbacks("on_val_batch_end")
         stats = self.get_stats()
@@ -338,4 +346,10 @@ class BaseValidator:
 
     def eval_json(self, stats):
         """Evaluate and return JSON format of prediction statistics."""
+        pass
+
+    def log_predictions_to_wandb(self, batch, preds, ni, trainer):
+        pass
+
+    def log_val_samples_to_wandb(self, batch, ni, trainer):
         pass

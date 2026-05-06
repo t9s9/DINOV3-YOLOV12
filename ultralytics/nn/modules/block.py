@@ -1225,10 +1225,11 @@ try:
         from torch.nn.functional import scaled_dot_product_attention as sdpa
 
         logger.warning("FlashAttention is not available on this device. Using scaled_dot_product_attention instead.")
-except Exception:
+except Exception as e:
     from torch.nn.functional import scaled_dot_product_attention as sdpa
 
     logger.warning("FlashAttention is not available on this device. Using scaled_dot_product_attention instead.")
+    logger.warning(f"Got error: {e}", )
 
 
 class AAttn(nn.Module):
@@ -1465,6 +1466,8 @@ class DINO3Backbone(nn.Module):
     ):
         super().__init__()
 
+
+        print("-----> Calling DINO3Backbone")
         if not TRANSFORMERS_AVAILABLE:
             raise ImportError(
                 "transformers library is required for DINO3Backbone. Install with: pip install transformers"
@@ -1710,7 +1713,6 @@ class DINO3Backbone(nn.Module):
 
         try:
             import os
-
             from transformers import AutoConfig, AutoModel
 
             # Get Hugging Face token from environment
@@ -2315,6 +2317,8 @@ class DINO3Preprocessor(nn.Module):
             raise ImportError(
                 "transformers library is required for DINO3Preprocessor. Install with: pip install transformers"
             )
+        print("-----> Calling DINO3Prepocessor")
+
 
         self.model_name = model_name
         self.freeze_backbone = freeze_backbone
@@ -2363,8 +2367,11 @@ class DINO3Preprocessor(nn.Module):
         # Load DINO model (same loading logic as DINO3Backbone)
         self.dino_model = self._load_dino_model()
 
+        if model_name not in self.dinov3_specs:
+            raise KeyError(f"Unrecognized DINOv3 model name {model_name}. Available models: " + ", ".join(self.dinov3_specs.keys()))
+
         # Create feature processing layers
-        spec = self.dinov3_specs.get(model_name, self.dinov3_specs["dinov3_vitb16"])
+        spec = self.dinov3_specs.get(model_name) # , self.dinov3_specs["dinov3_vitb16"]
         embed_dim = spec["embed_dim"]
 
         # Feature enhancement network: DINO features -> enhanced image features
@@ -2470,14 +2477,20 @@ class DINO3Preprocessor(nn.Module):
                     "vit7b16": "facebook/dinov2-giant",
                 }
 
-            # Get appropriate fallback
-            if self.dino_version == "3":
-                default_model = "facebook/dinov3-vitb16-pretrain-lvd1689m"
-            else:
-                default_model = "facebook/dinov2-base"
 
-            dino_model_id = dinov_mapping.get(self.model_name, default_model)
-            dino_model = AutoModel.from_pretrained(dino_model_id)
+            # Get Hugging Face token from environment
+            hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
+            if hf_token:
+                print(f"   Using HUGGINGFACE_HUB_TOKEN: {hf_token[:7]}...")
+                token_kwargs = {"token": hf_token}
+            else:
+                print("   No HUGGINGFACE_HUB_TOKEN found, using default authentication")
+                token_kwargs = {}
+
+            dino_model_id = dinov_mapping.get(self.model_name, dinov_mapping['dinov3_vitb16'])
+            print(dino_model_id, self.model_name, token_kwargs)
+
+            dino_model = AutoModel.from_pretrained(dino_model_id, **token_kwargs)
             print(f"✅ Successfully loaded DINOv{self.dino_version} from Hugging Face: {dino_model_id}")
             print(f"   Model variant: {self.model_name}")
             print(f"   Embedding dim mapping: {dino_model.config.hidden_size} -> {spec['embed_dim']}")

@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Optional, Union, Dict
 
 import numpy as np
 import torch
@@ -55,6 +56,8 @@ class DetectionValidator(BaseValidator):
                 "WARNING ⚠️ 'save_hybrid=True' will cause incorrect mAP.\n"
             )
 
+        self._single_print = True
+
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
         batch["img"] = batch["img"].to(self.device, non_blocking=True)
@@ -77,9 +80,9 @@ class DetectionValidator(BaseValidator):
         """Initialize evaluation metrics for YOLO."""
         val = self.data.get(self.args.split, "")  # validation path
         self.is_coco = (
-            isinstance(val, str)
-            and "coco" in val
-            and (val.endswith(f"{os.sep}val2017.txt") or val.endswith(f"{os.sep}test-dev2017.txt"))
+                isinstance(val, str)
+                and "coco" in val
+                and (val.endswith(f"{os.sep}val2017.txt") or val.endswith(f"{os.sep}test-dev2017.txt"))
         )  # is COCO
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
         self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(1, len(model.names) + 1))
@@ -186,7 +189,16 @@ class DetectionValidator(BaseValidator):
 
     def get_stats(self):
         """Returns metrics statistics and results dictionary."""
-        stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in self.stats.items()}  # to numpy
+        # stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in self.stats.items()}  # to numpy
+
+        stats = {
+            k: (
+                torch.cat(v, dim=0) if len(v) > 0
+                else torch.empty(0)
+            ).cpu().numpy()
+            for k, v in self.stats.items()
+        }
+
         self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=self.nc)
         self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=self.nc)
         stats.pop("target_img", None)
@@ -199,7 +211,8 @@ class DetectionValidator(BaseValidator):
         pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)  # print format
         LOGGER.info(pf % ("all", self.seen, self.nt_per_class.sum(), *self.metrics.mean_results()))
         if self.nt_per_class.sum() == 0:
-            LOGGER.warning(f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels")
+            LOGGER.warning(
+                f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels")
 
         # Print results per class
         if self.args.verbose and not self.training and self.nc > 1 and len(self.stats):
@@ -275,6 +288,160 @@ class DetectionValidator(BaseValidator):
             on_plot=self.on_plot,
         )  # pred
 
+    def create_wandb_images(
+            self,
+            images: Union[torch.Tensor, np.ndarray],
+            batch_idx: Union[torch.Tensor, np.ndarray],
+            cls: Union[torch.Tensor, np.ndarray],
+            bboxes: Union[torch.Tensor, np.ndarray],
+            confs: Optional[Union[torch.Tensor, np.ndarray]] = None,
+            names: Optional[Dict[int, str]] = None,
+            conf_thres: float = 0.0,
+    ) -> list:
+        """
+        Create W&B Image objects with bounding boxes for all images in a batch.
+
+        Args:
+            images: Batch of images to plot. Shape: (batch_size, channels, height, width).
+            batch_idx: Batch indices for each detection. Shape: (num_detections,).
+            cls: Class labels for each detection. Shape: (num_detections,).
+            bboxes: Bounding boxes for each detection. Shape: (num_detections, 4) in xywh format.
+            confs: Confidence scores for each detection. Shape: (num_detections,).
+            names: Dictionary mapping class indices to class names.
+            conf_thres: Confidence threshold for displaying detections.
+
+        Returns:
+            list: List of wandb.Image objects with bounding box annotations.
+        """
+        import wandb
+        from torchvision.tv_tensors import BoundingBoxes, BoundingBoxFormat
+        from torchvision.transforms.v2.functional import convert_bounding_box_format
+
+        # Convert tensors to numpy arrays
+        if isinstance(images, torch.Tensor):
+            images = images.cpu()
+        if isinstance(cls, torch.Tensor):
+            cls = cls.cpu()
+        if isinstance(bboxes, torch.Tensor):
+            bboxes = bboxes.cpu()
+        if isinstance(batch_idx, torch.Tensor):
+            batch_idx = batch_idx.cpu()
+        if confs is not None and isinstance(confs, torch.Tensor):
+            confs = confs.cpu()
+
+        batch_size = images.shape[0]
+        wandb_images = []
+
+        # Create class labels dictionary for W&B
+        class_labels = None
+        if names:
+            class_labels = {int(k): v for k, v in names.items()}
+
+        # Process each image in the batch
+        for img_idx in range(batch_size):
+            image = images[img_idx]  # Shape: (channels, height, width)
+
+            # Filter detections for this image
+            idx = batch_idx == img_idx
+
+            # Prepare bounding boxes for W&B
+            box_data = []
+            if idx.sum() > 0:
+                classes = cls[idx].int()
+                boxes = bboxes[idx]  # xywh format
+                confidences = confs[idx] if confs is not None else None
+
+                boxes = BoundingBoxes(boxes,
+                                      format=BoundingBoxFormat.CXCYWH,
+                                      canvas_size=(image.shape[-1], image.shape[-2]))
+
+                boxes = convert_bounding_box_format(boxes, new_format=BoundingBoxFormat.XYXY)
+
+                for i, (box, class_id) in enumerate(zip(boxes, classes)):
+                    class_name = names.get(class_id.item(), str(class_id))
+
+                    x1, y1, x2, y2 = box.tolist()
+
+                    box_dict = {
+                        "position": {"minX": x1, "minY": y1, "maxX": x2, "maxY": y2},
+                        "class_id": int(class_id),
+                        "box_caption": f"{class_name}",
+                    }
+
+                    if confidences is not None:
+                        box_dict["box_caption"] = f"{class_name} {confidences[i]:.2f}"
+                        box_dict["scores"] = {"confidence": float(confidences[i])}
+
+                    box_data.append(box_dict)
+
+            # Create W&B Image with bounding boxes
+            wandb_image = wandb.Image(
+                image,
+                boxes={
+                    "predictions": {
+                        "box_data": box_data,
+                        "class_labels": class_labels,
+                    }
+                }
+            )
+
+            wandb_images.append(wandb_image)
+
+        return wandb_images
+
+    def log_val_samples_to_wandb(self, batch, ni, trainer):
+        wandb_images = self.create_wandb_images(
+            images=batch["img"],
+            batch_idx=batch["batch_idx"],
+            cls=batch["cls"].squeeze(-1),
+            bboxes=batch["bboxes"],
+            names=self.names,
+            conf_thres=0,
+        )
+
+        # Log images to W&B
+        trainer.wandb_logger.log_metrics(
+            metrics={f"Validation Ground-Truth Batch {ni}": wandb_images},
+            step=trainer.epoch
+        )
+
+    def log_predictions_to_wandb(self, batch, preds, ni, trainer):
+        """
+        Log predicted bounding boxes to W&B.
+
+        Args:
+            batch: Batch dictionary containing images and metadata.
+            preds: Model predictions.
+            ni: Batch number for naming.
+            trainer: Trainer object
+        """
+        if trainer.wandb_logger is None:
+            return
+
+        # Convert predictions  to target format
+        batch_idx, cls, bboxes, confs = output_to_target(preds, max_det=self.args.max_det)
+        batch_idx = torch.from_numpy(batch_idx)
+        cls = torch.from_numpy(cls)
+        bboxes = torch.from_numpy(bboxes)
+        confs = torch.from_numpy(confs)
+
+        # Create W&B image
+        wandb_images = self.create_wandb_images(
+            images=batch["img"],
+            batch_idx=batch_idx,
+            cls=cls,
+            bboxes=bboxes,
+            confs=confs,
+            names=self.names,
+            conf_thres=0,
+        )
+
+        # Log images to W&B
+        trainer.wandb_logger.log_metrics(
+            metrics={f"Validation Predicted Batch {ni}": wandb_images},
+            step=trainer.epoch
+        )
+
     def save_one_txt(self, predn, save_conf, shape, file):
         """Save YOLO detections to a txt file in normalized coordinates in a specific format."""
         from ultralytics.engine.results import Results
@@ -307,9 +474,9 @@ class DetectionValidator(BaseValidator):
         if self.args.save_json and (self.is_coco or self.is_lvis) and len(self.jdict):
             pred_json = self.save_dir / "predictions.json"  # predictions
             anno_json = (
-                self.data["path"]
-                / "annotations"
-                / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
+                    self.data["path"]
+                    / "annotations"
+                    / ("instances_val2017.json" if self.is_coco else f"lvis_v1_{self.args.split}.json")
             )  # annotations
             pkg = "pycocotools" if self.is_coco else "lvis"
             LOGGER.info(f"\nEvaluating {pkg} mAP using {pred_json} and {anno_json}...")

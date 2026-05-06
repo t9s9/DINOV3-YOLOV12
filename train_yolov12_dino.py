@@ -319,7 +319,8 @@ def adjust_training_fraction_for_labels(data_yaml, fraction):
     return fraction
 
 
-def create_model_config_path(yolo_size, dinoversion=None, dino_variant=None, integration=None, dino_input=None):
+def create_model_config_path(yolo_size, dinoversion=None, dino_variant=None, integration=None, dino_input=None,
+                             raise_error=True):
     """
     Create model configuration path based on systematic naming convention.
 
@@ -329,6 +330,7 @@ def create_model_config_path(yolo_size, dinoversion=None, dino_variant=None, int
         dino_variant (str): DINO variant (vitb16, convnext_base, etc.)
         integration (str): Integration type (single, dual)
         dino_input (str): Custom DINO input path/identifier
+        raise_error (bool): If True, raise error instead of returning fallback config
 
     Returns:
         str: Path to model configuration file
@@ -340,7 +342,7 @@ def create_model_config_path(yolo_size, dinoversion=None, dino_variant=None, int
     # NEW INTEGRATION LOGIC:
     # single = P0 input preprocessing only
     # dual = P3+P4 backbone integration
-    # dualp0p3 = P0 input + P3 backbone (optimized dual)
+    # dualp0p3 = P0+P3 backbone (optimized dual)
     # triple = P0+P3+P4 all levels
 
     if integration == "single":
@@ -401,6 +403,9 @@ def create_model_config_path(yolo_size, dinoversion=None, dino_variant=None, int
     # Check if systematic config exists, otherwise use improved fallback
     config_path = Path("ultralytics/cfg/models/v12") / config_name
     if not config_path.exists():
+        if raise_error:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
         # Improved fallback: use size-specific configs for better architecture compatibility
         if integration == "dual":
             # For dual integration, use size-specific configs with proper A2C2f modules
@@ -705,6 +710,14 @@ def parse_arguments():
     )
     parser.add_argument("--overlap-mask", action="store_true", help="Overlap masks for training (segment models)")
     parser.add_argument("--mask-ratio", type=int, default=4, help="Mask downsample ratio (segment models) (default: 4)")
+
+
+    parser.add_argument("--wandb", action="store_true", help="Use Weights & Biases logging if available (default: False)")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="Entity/username for Weights & Biases logging")
+    parser.add_argument("--wandb-project", type=str, default=None, help="Project name for Weights & Biases logging")
+    parser.add_argument("--wandb-group", type=str, default=None, help="Group name for Weights & Biases logging")
+    parser.add_argument("--wandb-job_type", type=str, default=None, help="Job type for Weights & Biases logging")
+    parser.add_argument("--wandb-plots", action="store_true", help="Save detection in Weights & Biases plots")
 
     return parser.parse_args()
 
@@ -1173,9 +1186,15 @@ def main():
 
     # Create model configuration path
     model_config = create_model_config_path(
-        args.yolo_size, args.dinoversion, args.dino_variant, args.integration, args.dino_input
+        args.yolo_size, args.dinoversion, args.dino_variant, args.integration, args.dino_input, raise_error=True
     )
 
+    # with open("checker.txt", "a") as f:
+    #     f.write(f"{args.name} {model_config}\n")
+    #
+    # print(model_config)
+    # quit()
+    #
     # Handle special case: fallback config needs variant replacement
     # This happens when user specifies a variant (like vits16) but no specific config exists
     needs_variant_replacement = False
@@ -1390,6 +1409,13 @@ def main():
             "cache": args.cache,
             "overlap_mask": args.overlap_mask,
             "mask_ratio": args.mask_ratio,
+            # Wandb
+            "wandb": args.wandb,
+            "wandb_entity": args.wandb_entity,
+            "wandb_project": args.wandb_project,
+            "wandb_group": args.wandb_group,
+            "wandb_job_type": args.wandb_job_type,
+            "wandb_plots": args.wandb_plots,
             # Additional parameters
             "verbose": True,
         }
@@ -1399,6 +1425,8 @@ def main():
         while True:
             try:
                 results = model.train(**train_kwargs)
+                if hasattr(model, "trainer"):
+                    model.trainer.wandb_logger.log_hyperparams(vars(args))
                 break
             except IndexError as exc:
                 attempts += 1
